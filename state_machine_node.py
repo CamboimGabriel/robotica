@@ -45,6 +45,19 @@ class MazeStateMachineNode(Node):
         self.handle_color_duration = float(
             self.declare_parameter("handle_color_duration", 0.2).value
         )
+        self.color_turn_duration = float(
+            self.declare_parameter("color_turn_duration", 0.8).value
+        )
+        self.u_turn_duration = float(self.declare_parameter("u_turn_duration", 1.6).value)
+        self.color_red_action = str(
+            self.declare_parameter("color_red_action", "left").value
+        ).lower()
+        self.color_green_action = str(
+            self.declare_parameter("color_green_action", "right").value
+        ).lower()
+        self.color_blue_action = str(
+            self.declare_parameter("color_blue_action", "forward").value
+        ).lower()
         self.control_rate_hz = float(self.declare_parameter("control_rate_hz", 10.0).value)
         self.loop_history_size = int(self.declare_parameter("loop_history_size", 30).value)
         self.loop_revisit_count = int(self.declare_parameter("loop_revisit_count", 7).value)
@@ -110,7 +123,7 @@ class MazeStateMachineNode(Node):
 
         if self.is_new_color_event():
             self.record_current_marker(self.latest_color)
-            self.transition_to(self.HANDLE_COLOR, self.handle_color_duration)
+            self.transition_to_color_action(self.latest_color)
             self.execute_current_state()
             return
 
@@ -194,6 +207,25 @@ class MazeStateMachineNode(Node):
         self.get_logger().info(
             f"New marker: color={color}, x={x:.2f}, y={y:.2f}, total={len(self.used_markers)}"
         )
+
+    def transition_to_color_action(self, color: str) -> None:
+        action_map = {
+            "red": self.color_red_action,
+            "green": self.color_green_action,
+            "blue": self.color_blue_action,
+        }
+        action = action_map.get(color, "forward")
+
+        if action == "left":
+            self.transition_to(self.TURN_LEFT, self.color_turn_duration)
+        elif action == "right":
+            self.transition_to(self.TURN_RIGHT, self.color_turn_duration)
+        elif action == "u_turn":
+            self.transition_to(self.RECOVERY, self.u_turn_duration)
+        else:
+            self.transition_to(self.HANDLE_COLOR, self.handle_color_duration)
+
+        self.get_logger().info(f"Color action: color={color}, action={action}")
 
     def transition_to(self, state: str, duration: float = 0.0) -> None:
         self.current_state = state
