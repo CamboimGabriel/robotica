@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import math
 from collections import deque
 from typing import Deque, Dict, List, Optional, Tuple
@@ -16,87 +14,58 @@ class MazeStateMachineNode(Node):
     GO_FORWARD = "GO_FORWARD"
     TURN_LEFT = "TURN_LEFT"
     TURN_RIGHT = "TURN_RIGHT"
-    HANDLE_COLOR = "HANDLE_COLOR"
     RECOVERY = "RECOVERY"
+    STOP_BEFORE_TURN = "STOP_BEFORE_TURN"  # NOVO ESTADO DE PARADA
 
-    VALID_COLORS = {"red", "green", "blue"}
+    VALID_COLORS = {"red", "green"}
 
     def __init__(self) -> None:
         super().__init__("maze_state_machine")
         
         self.set_parameters([rclpy.parameter.Parameter(
-	    'use_sim_time',
-	    rclpy.Parameter.Type.BOOL,
-	    True
-	)])
+            'use_sim_time',
+            rclpy.Parameter.Type.BOOL,
+            True
+        )])
 
-        self.forward_speed = float(self.declare_parameter("forward_speed", 0.2).value)
-        self.turn_speed = float(self.declare_parameter("turn_speed", 0.6).value)
+        # Parâmetros ajustados para lidar com a inércia (mais lentos e visão mais longa)
+        self.forward_speed = float(self.declare_parameter("forward_speed", 0.1).value)
+        self.turn_speed = float(self.declare_parameter("turn_speed", 0.3).value)
         self.front_obstacle_threshold = float(
-            self.declare_parameter("front_obstacle_threshold", 0.5).value
-        )
-        self.side_open_threshold = float(
-            self.declare_parameter("side_open_threshold", 0.6).value
+            self.declare_parameter("front_obstacle_threshold", 0.75).value
         )
         self.marker_distance_threshold = float(
             self.declare_parameter("marker_distance_threshold", 0.5).value
         )
-        self.loop_distance_threshold = float(
-            self.declare_parameter("loop_distance_threshold", 0.2).value
-        )
-        self.turn_duration = float(self.declare_parameter("turn_duration", 0.9).value)
-        self.recovery_duration = float(
-            self.declare_parameter("recovery_duration", 1.8).value
-        )
-        self.handle_color_duration = float(
-            self.declare_parameter("handle_color_duration", 0.2).value
-        )
-        self.color_turn_duration = float(
-            self.declare_parameter("color_turn_duration", 0.8).value
-        )
-        self.u_turn_duration = float(self.declare_parameter("u_turn_duration", 1.6).value)
-        self.color_red_action = str(
-            self.declare_parameter("color_red_action", "left").value
-        ).lower()
-        self.color_green_action = str(
-            self.declare_parameter("color_green_action", "right").value
-        ).lower()
-        self.color_blue_action = str(
-            self.declare_parameter("color_blue_action", "forward").value
-        ).lower()
         self.control_rate_hz = float(self.declare_parameter("control_rate_hz", 10.0).value)
-        self.decision_log_interval = float(
-            self.declare_parameter("decision_log_interval", 0.7).value
-        )
-        self.loop_history_size = int(self.declare_parameter("loop_history_size", 30).value)
-        self.loop_revisit_count = int(self.declare_parameter("loop_revisit_count", 7).value)
-        self.recovery_cooldown = float(
-            self.declare_parameter("recovery_cooldown", 4.0).value
-        )
 
-        self.cmd_pub = self.create_publisher(Twist, "/jetauto/cmd_vel", 10) #mudei de "/cmd_vel"
+        # === VARIÁVEIS PARA GIRO EXATO, PARADA E ACELERAÇÃO ===
+        self.target_yaw: Optional[float] = None
+        self.yaw_tolerance = 0.05  # Tolerância em radianos
+        
+        self.next_state_after_stop = ""
+        self.stop_wait_duration = 1.0      # Segundos que ele fica totalmente parado
+        self.current_forward_speed = 0.0   # Velocidade atual (para a rampa)
+        self.acceleration_step = 0.005      # Taxa de aceleração por ciclo do control_loop
+
+        # Publishers e Subscribers
+        self.cmd_pub = self.create_publisher(Twist, "/jetauto/cmd_vel", 10)
         self.create_subscription(LaserScan, "/jetauto/lidar/scan", self.scan_callback, 10)
         self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
         self.create_subscription(String, "/color_detected", self.color_callback, 10)
-
-        # === ADICIONEI ESTAS DUAS LINHAS AQUI ===
         self.create_subscription(Twist, "/cmd_vel_nav", self.nav_callback, 10)
-        self.latest_nav_cmd = Twist()
 
+        self.latest_nav_cmd = Twist()
         self.current_state = self.GO_FORWARD
         self.state_end_time = 0.0
-        self.last_recovery_time = -1e9
-        self.last_decision_log_time = -1e9
-
+        
         self.latest_scan: Optional[LaserScan] = None
         self.current_position: Optional[Tuple[float, float, float]] = None
         self.latest_color: str = "none"
-
-        self.position_history: Deque[Tuple[float, float]] = deque(maxlen=self.loop_history_size)
         self.used_markers: List[Dict[str, float]] = []
 
         self.create_timer(1.0 / self.control_rate_hz, self.control_loop)
-        self.get_logger().info("Maze state machine node started.")
+        self.get_logger().info("Maze state machine node started. Prontos para o labirinto!")
 
     def scan_callback(self, msg: LaserScan) -> None:
         self.latest_scan = msg
@@ -107,95 +76,170 @@ class MazeStateMachineNode(Node):
         q = msg.pose.pose.orientation
         yaw = self.quaternion_to_yaw(q.x, q.y, q.z, q.w)
         self.current_position = (x, y, yaw)
-        self.position_history.append((x, y))
 
     def color_callback(self, msg: String) -> None:
         self.latest_color = msg.data.strip().lower()
 
-    # === ADICIONEI ESTA FUNÇÃO ===
     def nav_callback(self, msg: Twist) -> None:
         self.latest_nav_cmd = msg
+
+    def normalize_angle(self, angle: float) -> float:
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    def transition_to_stop_then_turn(self, next_state: str) -> None:
+        """Trava o robô e aguarda antes de iniciar a curva."""
+        self.current_state = self.STOP_BEFORE_TURN
+        self.next_state_after_stop = next_state
+        self.state_end_time = self.now_seconds() + self.stop_wait_duration
+        self.current_forward_speed = 0.0  # Zera a rampa de aceleração
+        self.publish_cmd_vel(0.0, 0.0)    # Freia imediatamente
+        self.get_logger().info(f"Freando! Esperando {self.stop_wait_duration}s antes de girar.")
 
     def control_loop(self) -> None:
         if self.latest_scan is None or self.current_position is None:
             self.publish_cmd_vel(0.0, 0.0)
             return
 
+        x, y, current_yaw = self.current_position
         now = self.now_seconds()
-        should_log = self.should_log_decision(now)
-        if self.current_state in {
-            self.TURN_LEFT,
-            self.TURN_RIGHT,
-            self.HANDLE_COLOR,
-            self.RECOVERY,
-        } and now < self.state_end_time:
-            if should_log:
-                self.get_logger().info(
-                    "STATE=ACTIVE_TIMER "
-                    f"active_state={self.current_state} "
-                    f"remaining={max(0.0, self.state_end_time - now):.2f}s"
-                )
-            self.execute_current_state()
+
+        # 0. GERENCIA O ESTADO DE PARADA TOTAL (INÉRCIA)
+        if self.current_state == self.STOP_BEFORE_TURN:
+            if now >= self.state_end_time:
+                self.current_state = self.next_state_after_stop
+                self.get_logger().info(f"Parada concluída. Iniciando {self.next_state_after_stop}.")
+            else:
+                self.publish_cmd_vel(0.0, 0.0)
             return
 
-        self.current_state = self.GO_FORWARD
+        # 1. VERIFICA SE ESTÁ NO MEIO DE UMA CURVA (ODOMETRIA)
+        if self.current_state in {self.TURN_LEFT, self.TURN_RIGHT}:
+            if self.target_yaw is not None:
+                angle_diff = abs(self.normalize_angle(self.target_yaw - current_yaw))
+                
+                if angle_diff <= self.yaw_tolerance:
+                    self.get_logger().info("Curva concluída! Retomando aceleração em linha reta.")
+                    self.target_yaw = None
+                    self.current_state = self.GO_FORWARD
+                    self.current_forward_speed = 0.0 # Garante que acelera do zero
+                    self.latest_color = "none"       # Limpa a cor para não ler novamente a mesma parede
+                else:
+                    self.execute_current_state()
+                    return
 
-        if self.is_looping() and (now - self.last_recovery_time) > self.recovery_cooldown:
-            if should_log:
-                self.get_logger().info(
-                    "STATE_DECISION reason=loop_detected "
-                    f"recovery_cooldown={self.recovery_cooldown:.2f}s "
-                    f"time_since_last_recovery={now - self.last_recovery_time:.2f}s "
-                    f"action={self.RECOVERY}"
-                )
-            self.transition_to(self.RECOVERY, self.recovery_duration)
-            self.last_recovery_time = now
-            self.execute_current_state()
-            return
-
+        # 2. VERIFICA SE ENCONTROU UMA COR NOVA
         if self.is_new_color_event():
-            if should_log:
-                self.get_logger().info(
-                    "STATE_DECISION reason=color_event "
-                    f"color={self.latest_color} action=color_mapping"
-                )
             self.record_current_marker(self.latest_color)
-            self.transition_to_color_action(self.latest_color)
-            self.execute_current_state()
+            
+            if self.latest_color == "red":
+                self.get_logger().info("Parede Vermelha! Preparando giro para a ESQUERDA.")
+                self.target_yaw = self.normalize_angle(current_yaw + (math.pi / 2.0))
+                self.transition_to_stop_then_turn(self.TURN_LEFT)
+            
+            elif self.latest_color == "green":
+                self.get_logger().info("Parede Verde! Preparando giro para a DIREITA.")
+                self.target_yaw = self.normalize_angle(current_yaw - (math.pi / 2.0))
+                self.transition_to_stop_then_turn(self.TURN_RIGHT)
+            
             return
 
+        # 3. VERIFICA OBSTÁCULOS COM O LIDAR (A PAREDE PRETA/CRUZAMENTO T)
         front, left, right = self.process_scan_sectors(self.latest_scan)
-        if should_log:
-            self.get_logger().info(
-                "STATE_SENSORS "
-                f"front={self.format_distance(front)} "
-                f"left={self.format_distance(left)} "
-                f"right={self.format_distance(right)} "
-                f"front_threshold={self.front_obstacle_threshold:.3f} "
-                f"side_threshold={self.side_open_threshold:.3f}"
-            )
+        
         if front < self.front_obstacle_threshold:
-            turn_state = self.choose_turn_direction(left, right)
-            if should_log:
-                self.get_logger().info(
-                    "STATE_DECISION reason=front_blocked "
-                    f"left={self.format_distance(left)} "
-                    f"right={self.format_distance(right)} "
-                    f"action={turn_state}"
-                )
-            self.transition_to(turn_state, self.turn_duration)
-            self.execute_current_state()
+            self.get_logger().info(f"Obstáculo frontal a {front:.2f}m. Decidindo lado...")
+            
+            if right > left:
+                self.get_logger().info("Caminho livre à DIREITA.")
+                self.target_yaw = self.normalize_angle(current_yaw - (math.pi / 2.0))
+                self.transition_to_stop_then_turn(self.TURN_RIGHT)
+            else:
+                self.get_logger().info("Caminho livre à ESQUERDA.")
+                self.target_yaw = self.normalize_angle(current_yaw + (math.pi / 2.0))
+                self.transition_to_stop_then_turn(self.TURN_LEFT)
+            
             return
 
-        if should_log:
-            self.get_logger().info(
-                f"STATE_DECISION reason=path_clear action={self.GO_FORWARD}"
-            )
+        # Se não tem obstáculo nem cor, continua a lógica de seguir em frente
         self.current_state = self.GO_FORWARD
         self.execute_current_state()
 
+    def execute_current_state(self) -> None:
+        """
+        Executa a lógica de movimentação baseada no estado atual.
+        Agora com suporte total a movimentos omnidirecionais (strafing).
+        """
+        self.get_logger().info(f"ESTADO ATUAL: {self.current_state}")
+        
+        cmd = Twist()
+
+        # --- ESTADO: SEGUIR EM FRENTE ---
+        if self.current_state == self.GO_FORWARD:
+            # 1. Rampa de Aceleração Suave
+            if self.current_forward_speed < self.forward_speed:
+                self.current_forward_speed += self.acceleration_step
+                self.current_forward_speed = min(self.current_forward_speed, self.forward_speed)
+
+            # 2. Movimento para frente (Eixo X) controlado pela State Machine
+            cmd.linear.x = self.current_forward_speed 
+            
+            # 3. Centralização Lateral (Eixo Y) vinda do OmniNavLayer
+            # O robô desliza como um caranguejo para se manter no centro, 
+            # mantendo o nariz (angular.z) sempre em ZERO (apontado para frente).
+            cmd.linear.y = self.latest_nav_cmd.linear.y
+            cmd.angular.z = 0.0 
+            
+            self.get_logger().info(f"AVANÇANDO: x={cmd.linear.x:.2f}, y={cmd.linear.y:.2f}")
+
+        # --- ESTADO: PARADA E SEGURANÇA ---
+        elif self.current_state == self.STOP_BEFORE_TURN:
+            # Garante imobilidade total antes de iniciar uma rotação
+            cmd.linear.x = 0.0
+            cmd.linear.y = 0.0
+            cmd.angular.z = 0.0
+            self.get_logger().info("FREANDO: Aguardando inércia parar...")
+
+        # --- ESTADOS: ROTAÇÃO DE 90 GRAUS ---
+        elif self.current_state == self.TURN_LEFT:
+            # Gira no próprio eixo (sem sair do lugar)
+            cmd.linear.x = 0.0
+            cmd.linear.y = 0.0
+            cmd.angular.z = self.turn_speed
+            self.get_logger().info("GIRANDO: Esquerda (90°)")
+
+        elif self.current_state == self.TURN_RIGHT:
+            # Gira no próprio eixo (sem sair do lugar)
+            cmd.linear.x = 0.0
+            cmd.linear.y = 0.0
+            cmd.angular.z = -self.turn_speed
+            self.get_logger().info("GIRANDO: Direita (90°)")
+
+        # --- ESTADO: RECUPERAÇÃO / LOOP ---
+        elif self.current_state == self.RECOVERY:
+            # Dá uma leve ré e gira para tentar achar um caminho novo
+            cmd.linear.x = -0.05
+            cmd.angular.z = self.turn_speed
+            self.get_logger().warn("RECUPERAÇÃO: Saindo de possível colisão/loop.")
+
+        # --- SEGURANÇA PADRÃO ---
+        else:
+            cmd.linear.x = 0.0
+            cmd.linear.y = 0.0
+            cmd.angular.z = 0.0
+
+        # Publica o comando final para os motores
+        self.cmd_pub.publish(cmd)
+
     def process_scan_sectors(self, scan: LaserScan) -> Tuple[float, float, float]:
-        front = self.sector_min_distance(scan, -15.0, 15.0)
+        # Visão em túnel: olha apenas de -4° a +4° para frente.
+        # Ignora as paredes laterais mesmo nos corredores mais estreitos!
+        front = self.sector_min_distance(scan, -2.0, 2.0) 
+        
+        # A visão lateral continua ampla para ele medir bem as distâncias
         left = self.sector_min_distance(scan, 60.0, 120.0)
         right = self.sector_min_distance(scan, -120.0, -60.0)
         return front, left, right
@@ -227,22 +271,10 @@ class MazeStateMachineNode(Node):
                     min_dist = d
         return min_dist
 
-    def is_looping(self) -> bool:
-        if len(self.position_history) < self.loop_history_size:
-            return False
-        if self.current_position is None:
-            return False
-
-        x, y, _ = self.current_position
-        close_count = 0
-        for px, py in self.position_history:
-            if self.distance_2d(x, y, px, py) <= self.loop_distance_threshold:
-                close_count += 1
-        return close_count >= self.loop_revisit_count
-
     def is_new_color_event(self) -> bool:
         if self.current_position is None:
             return False
+        
         if self.latest_color not in self.VALID_COLORS:
             return False
 
@@ -259,60 +291,6 @@ class MazeStateMachineNode(Node):
             return
         x, y, _ = self.current_position
         self.used_markers.append({"color": color, "x": x, "y": y})
-        self.get_logger().info(
-            f"New marker: color={color}, x={x:.2f}, y={y:.2f}, total={len(self.used_markers)}"
-        )
-
-    def transition_to_color_action(self, color: str) -> None:
-        action_map = {
-            "red": self.color_red_action,
-            "green": self.color_green_action,
-            "blue": self.color_blue_action,
-        }
-        action = action_map.get(color, "forward")
-
-        if action == "left":
-            self.transition_to(self.TURN_LEFT, self.color_turn_duration)
-        elif action == "right":
-            self.transition_to(self.TURN_RIGHT, self.color_turn_duration)
-        elif action == "u_turn":
-            self.transition_to(self.RECOVERY, self.u_turn_duration)
-        else:
-            self.transition_to(self.HANDLE_COLOR, self.handle_color_duration)
-
-        self.get_logger().info(f"Color action: color={color}, action={action}")
-
-    def transition_to(self, state: str, duration: float = 0.0) -> None:
-        self.current_state = state
-        self.state_end_time = self.now_seconds() + max(0.0, duration)
-
-    def execute_current_state(self) -> None:
-        self.get_logger().info(f"STATE: {self.current_state}")
-        if self.current_state == self.GO_FORWARD:
-            self.get_logger().info("ENTROU NO GO_FORWARD")
-            cmd = Twist()
-            cmd.linear.x = self.latest_nav_cmd.linear.x
-            cmd.linear.y = self.latest_nav_cmd.linear.y
-            cmd.angular.z = self.latest_nav_cmd.angular.z
-            self.get_logger().info(
-                f"CMD NAV: x={cmd.linear.x}, y={cmd.linear.y}, z={cmd.angular.z}"
-            )
-            self.cmd_pub.publish(cmd)
-
-        elif self.current_state == self.TURN_LEFT:
-            self.publish_cmd_vel(0.0, self.turn_speed)
-
-        elif self.current_state == self.TURN_RIGHT:
-            self.publish_cmd_vel(0.0, -self.turn_speed)
-
-        elif self.current_state == self.HANDLE_COLOR:
-            self.publish_cmd_vel(self.forward_speed * 0.6, 0.0)
-
-        elif self.current_state == self.RECOVERY:
-            self.publish_cmd_vel(0.0, self.turn_speed)
-
-        else:
-            self.publish_cmd_vel(0.0, 0.0)
 
     def publish_cmd_vel(self, linear_x: float, angular_z: float) -> None:
         msg = Twist()
@@ -329,33 +307,9 @@ class MazeStateMachineNode(Node):
     @staticmethod
     def distance_2d(x1: float, y1: float, x2: float, y2: float) -> float:
         return math.hypot(x1 - x2, y1 - y2)
-
+        
     def now_seconds(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
-
-    def should_log_decision(self, now: float) -> bool:
-        if (now - self.last_decision_log_time) >= self.decision_log_interval:
-            self.last_decision_log_time = now
-            return True
-        return False
-
-    def choose_turn_direction(self, left: float, right: float) -> str:
-        if math.isinf(left) and math.isinf(right):
-            return self.TURN_LEFT
-        if math.isinf(right):
-            return self.TURN_RIGHT
-        if math.isinf(left):
-            return self.TURN_LEFT
-        if right > left:
-            return self.TURN_RIGHT
-        return self.TURN_LEFT
-
-    @staticmethod
-    def format_distance(value: float) -> str:
-        if math.isinf(value):
-            return "inf"
-        return f"{value:.3f}"
-
 
 def main(args=None) -> None:
     rclpy.init(args=args)
@@ -369,6 +323,5 @@ def main(args=None) -> None:
         node.destroy_node()
         rclpy.shutdown()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
