@@ -28,11 +28,10 @@ class MazeStateMachineNode(Node):
             True
         )])
 
-        # Parâmetros ajustados para lidar com a inércia (mais lentos e visão mais longa)
-        self.forward_speed = float(self.declare_parameter("forward_speed", 0.1).value)
-        self.turn_speed = float(self.declare_parameter("turn_speed", 0.3).value)
+        self.forward_speed = float(self.declare_parameter("forward_speed", 0.18).value)
+        self.turn_speed = float(self.declare_parameter("turn_speed", 0.4).value)
         self.front_obstacle_threshold = float(
-            self.declare_parameter("front_obstacle_threshold", 0.75).value
+            self.declare_parameter("front_obstacle_threshold", 0.45).value
         )
         self.marker_distance_threshold = float(
             self.declare_parameter("marker_distance_threshold", 0.5).value
@@ -44,9 +43,9 @@ class MazeStateMachineNode(Node):
         self.yaw_tolerance = 0.05  # Tolerância em radianos
         
         self.next_state_after_stop = ""
-        self.stop_wait_duration = 1.0      # Segundos que ele fica totalmente parado
-        self.current_forward_speed = 0.0   # Velocidade atual (para a rampa)
-        self.acceleration_step = 0.005      # Taxa de aceleração por ciclo do control_loop
+        self.stop_wait_duration = 0.4
+        self.current_forward_speed = 0.0
+        self.acceleration_step = 0.02
 
         # Publishers e Subscribers
         self.cmd_pub = self.create_publisher(Twist, "/jetauto/cmd_vel", 10)
@@ -235,9 +234,7 @@ class MazeStateMachineNode(Node):
         self.cmd_pub.publish(cmd)
 
     def process_scan_sectors(self, scan: LaserScan) -> Tuple[float, float, float]:
-        # Visão em túnel: olha apenas de -4° a +4° para frente.
-        # Ignora as paredes laterais mesmo nos corredores mais estreitos!
-        front = self.sector_min_distance(scan, -2.0, 2.0) 
+        front = self.sector_min_distance(scan, -10.0, 10.0)
         
         # A visão lateral continua ampla para ele medir bem as distâncias
         left = self.sector_min_distance(scan, 60.0, 120.0)

@@ -25,16 +25,15 @@ class OmniNavLayer(Node):
             self.lidar_callback, 
             10)
             
-        self.dist_seguranca_frontal = 0.7   
-        self.dist_parede_alvo = 0.45
+        self.dist_seguranca_frontal = 0.4
+        self.dist_parede_alvo = 0.35
         
-        self.vel_cruzeiro = 0.5             
-        self.k_lateral = 1.0                
+        self.vel_cruzeiro = 0.25
+        self.k_lateral = 0.8
         
-        # limites 
-        self.max_linear_x = 0.5
-        self.max_linear_y = 0.3
-        self.max_angular_z = 1.0
+        self.max_linear_x = 0.3
+        self.max_linear_y = 0.2
+        self.max_angular_z = 0.8
 
         self.get_logger().info("OmniNavLayer iniciado")
 
