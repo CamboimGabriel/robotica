@@ -65,6 +65,9 @@ class MazeStateMachineNode(Node):
             self.declare_parameter("color_blue_action", "forward").value
         ).lower()
         self.control_rate_hz = float(self.declare_parameter("control_rate_hz", 10.0).value)
+        self.decision_log_interval = float(
+            self.declare_parameter("decision_log_interval", 0.7).value
+        )
         self.loop_history_size = int(self.declare_parameter("loop_history_size", 30).value)
         self.loop_revisit_count = int(self.declare_parameter("loop_revisit_count", 7).value)
         self.recovery_cooldown = float(
@@ -83,6 +86,7 @@ class MazeStateMachineNode(Node):
         self.current_state = self.GO_FORWARD
         self.state_end_time = 0.0
         self.last_recovery_time = -1e9
+        self.last_decision_log_time = -1e9
 
         self.latest_scan: Optional[LaserScan] = None
         self.current_position: Optional[Tuple[float, float, float]] = None
@@ -118,38 +122,75 @@ class MazeStateMachineNode(Node):
             return
 
         now = self.now_seconds()
+        should_log = self.should_log_decision(now)
         if self.current_state in {
             self.TURN_LEFT,
             self.TURN_RIGHT,
             self.HANDLE_COLOR,
             self.RECOVERY,
         } and now < self.state_end_time:
+            if should_log:
+                self.get_logger().info(
+                    "STATE=ACTIVE_TIMER "
+                    f"active_state={self.current_state} "
+                    f"remaining={max(0.0, self.state_end_time - now):.2f}s"
+                )
             self.execute_current_state()
             return
 
         self.current_state = self.GO_FORWARD
 
         if self.is_looping() and (now - self.last_recovery_time) > self.recovery_cooldown:
+            if should_log:
+                self.get_logger().info(
+                    "STATE_DECISION reason=loop_detected "
+                    f"recovery_cooldown={self.recovery_cooldown:.2f}s "
+                    f"time_since_last_recovery={now - self.last_recovery_time:.2f}s "
+                    f"action={self.RECOVERY}"
+                )
             self.transition_to(self.RECOVERY, self.recovery_duration)
             self.last_recovery_time = now
             self.execute_current_state()
             return
 
         if self.is_new_color_event():
+            if should_log:
+                self.get_logger().info(
+                    "STATE_DECISION reason=color_event "
+                    f"color={self.latest_color} action=color_mapping"
+                )
             self.record_current_marker(self.latest_color)
             self.transition_to_color_action(self.latest_color)
             self.execute_current_state()
             return
 
         front, left, right = self.process_scan_sectors(self.latest_scan)
+        if should_log:
+            self.get_logger().info(
+                "STATE_SENSORS "
+                f"front={self.format_distance(front)} "
+                f"left={self.format_distance(left)} "
+                f"right={self.format_distance(right)} "
+                f"front_threshold={self.front_obstacle_threshold:.3f} "
+                f"side_threshold={self.side_open_threshold:.3f}"
+            )
         if front < self.front_obstacle_threshold:
-            if right > self.side_open_threshold:
-                self.transition_to(self.TURN_RIGHT, self.turn_duration)
-            else:
-                self.transition_to(self.TURN_LEFT, self.turn_duration)
+            turn_state = self.choose_turn_direction(left, right)
+            if should_log:
+                self.get_logger().info(
+                    "STATE_DECISION reason=front_blocked "
+                    f"left={self.format_distance(left)} "
+                    f"right={self.format_distance(right)} "
+                    f"action={turn_state}"
+                )
+            self.transition_to(turn_state, self.turn_duration)
             self.execute_current_state()
             return
 
+        if should_log:
+            self.get_logger().info(
+                f"STATE_DECISION reason=path_clear action={self.GO_FORWARD}"
+            )
         self.current_state = self.GO_FORWARD
         self.execute_current_state()
 
@@ -251,8 +292,11 @@ class MazeStateMachineNode(Node):
             self.get_logger().info("ENTROU NO GO_FORWARD")
             cmd = Twist()
             cmd.linear.x = self.latest_nav_cmd.linear.x
-            cmd.angular.z = -2.0 * self.latest_nav_cmd.linear.y
-            self.get_logger().info(f"CMD NAV: x={cmd.linear.x}, z={cmd.angular.z}")
+            cmd.linear.y = self.latest_nav_cmd.linear.y
+            cmd.angular.z = self.latest_nav_cmd.angular.z
+            self.get_logger().info(
+                f"CMD NAV: x={cmd.linear.x}, y={cmd.linear.y}, z={cmd.angular.z}"
+            )
             self.cmd_pub.publish(cmd)
 
         elif self.current_state == self.TURN_LEFT:
@@ -288,6 +332,29 @@ class MazeStateMachineNode(Node):
 
     def now_seconds(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
+
+    def should_log_decision(self, now: float) -> bool:
+        if (now - self.last_decision_log_time) >= self.decision_log_interval:
+            self.last_decision_log_time = now
+            return True
+        return False
+
+    def choose_turn_direction(self, left: float, right: float) -> str:
+        if math.isinf(left) and math.isinf(right):
+            return self.TURN_LEFT
+        if math.isinf(right):
+            return self.TURN_RIGHT
+        if math.isinf(left):
+            return self.TURN_LEFT
+        if right > left:
+            return self.TURN_RIGHT
+        return self.TURN_LEFT
+
+    @staticmethod
+    def format_distance(value: float) -> str:
+        if math.isinf(value):
+            return "inf"
+        return f"{value:.3f}"
 
 
 def main(args=None) -> None:
