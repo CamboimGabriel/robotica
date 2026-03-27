@@ -38,12 +38,6 @@ class MazeStateMachineNode(Node):
         self.min_approach_speed = float(
             self.declare_parameter("min_approach_speed", 0.05).value
         )
-        self.lateral_reduce_distance = float(
-            self.declare_parameter("lateral_reduce_distance", 1.0).value
-        )
-        self.lateral_reduce_factor = float(
-            self.declare_parameter("lateral_reduce_factor", 0.35).value
-        )
         self.marker_distance_threshold = float(
             self.declare_parameter("marker_distance_threshold", 0.5).value
         )
@@ -206,9 +200,7 @@ class MazeStateMachineNode(Node):
                 self.current_forward_speed -= self.acceleration_step
                 self.current_forward_speed = max(self.current_forward_speed, target_speed)
             cmd.linear.x = self.current_forward_speed
-            cmd.linear.y = self.compute_lateral_command(
-                self.latest_nav_cmd.linear.y, self.last_front_distance
-            )
+            cmd.linear.y = 0.0
             cmd.angular.z = 0.0
 
         elif self.current_state == self.STOP_BEFORE_TURN:
@@ -319,14 +311,6 @@ class MazeStateMachineNode(Node):
             self.forward_speed - self.min_approach_speed
         )
         return max(self.min_approach_speed, min(self.forward_speed, scaled_speed))
-
-    def compute_lateral_command(self, nav_linear_y: float, front_distance: float) -> float:
-        if not math.isfinite(front_distance):
-            return nav_linear_y
-        if front_distance >= self.lateral_reduce_distance:
-            return nav_linear_y
-        return nav_linear_y * self.lateral_reduce_factor
-
 
 def main(args=None) -> None:
     rclpy.init(args=args)
