@@ -9,98 +9,85 @@ import math
 class OmniNavLayer(Node):
     def __init__(self):
         super().__init__('omni_nav_layer')
-        
-        self.set_parameters([rclpy.parameter.Parameter(
-	    'use_sim_time',
-	    rclpy.Parameter.Type.BOOL,
-	    True
-	)])
-        
-        # Publica para a state machine consumir
+
+        #self.declare_parameter('use_sim_time', True)
+
         self.publisher_ = self.create_publisher(Twist, '/cmd_vel_nav', 10)
-        
+
         self.subscription = self.create_subscription(
-            LaserScan, 
-            '/jetauto/lidar/scan', 
-            self.lidar_callback, 
-            10)
-            
-        self.dist_seguranca_frontal = 0.4
-        self.dist_parede_alvo = 0.35
-        
-        self.vel_cruzeiro = 0.25
-        self.k_lateral = 0.8
-        self.dist_parede_detectada = 1.2
-        self.vel_entrada = 0.16
-        self.reducao_lateral_perto = 0.35
-        self.dist_reducao_lateral_frente = 0.9
-        
-        self.max_linear_x = 0.3
-        self.max_linear_y = 0.2
-        self.max_angular_z = 0.8
+            LaserScan,
+            '/jetauto/lidar/scan',
+            self.lidar_callback,
+            10
+        )
+
+        self.dist_seguranca_frontal = 0.7
+        self.dist_parede_alvo = 0.45
+
+        self.vel_cruzeiro = 0.5
+        self.k_lateral = 1.0
+
+        self.max_linear_x = 0.5
+        self.max_linear_y = 0.3
+        self.max_angular_z = 1.0
 
         self.get_logger().info("OmniNavLayer iniciado")
 
     def lidar_callback(self, msg):
-        ranges = [
-            x if msg.range_min < x < msg.range_max else 10.0
-            for x in msg.ranges
-        ]
+        frente = self.sector_min_distance(msg, -10.0, 10.0)
+        direita = self.sector_min_distance(msg, -100.0, -70.0)
+        frente_dir = self.sector_min_distance(msg, -60.0, -20.0)
 
-        n = len(ranges)
+        self.gerar_comando(frente, frente_dir, direita)
 
-        frente = min(ranges[int(n*0.48): int(n*0.52)])
-        esquerda = min(ranges[int(n*0.70): int(n*0.80)])
-        direita = min(ranges[int(n*0.20): int(n*0.30)])
-        frente_dir = min(ranges[int(n*0.30): int(n*0.40)])
-        frente_esq = min(ranges[int(n*0.60): int(n*0.70)])
+    def sector_min_distance(self, scan, start_deg, end_deg):
+        if not scan.ranges or scan.angle_increment == 0.0:
+            return float('inf')
 
-        self.gerar_comando(frente, frente_dir, frente_esq, direita, esquerda)
+        start_rad = math.radians(start_deg)
+        end_rad = math.radians(end_deg)
 
-    def gerar_comando(self, dist_frente, dist_frente_dir, dist_frente_esq, dist_dir, dist_esq):
+        i0 = int((start_rad - scan.angle_min) / scan.angle_increment)
+        i1 = int((end_rad - scan.angle_min) / scan.angle_increment)
+
+        n = len(scan.ranges)
+        i0 = max(0, min(n - 1, i0))
+        i1 = max(0, min(n - 1, i1))
+
+        if i0 > i1:
+            i0, i1 = i1, i0
+
+        best = float('inf')
+        for i in range(i0, i1 + 1):
+            d = scan.ranges[i]
+            if math.isfinite(d) and scan.range_min <= d <= scan.range_max:
+                if d < best:
+                    best = d
+
+        return best
+
+    def gerar_comando(self, dist_frente, dist_frente_dir, dist_dir):
         msg = Twist()
-        largura_corredor = dist_dir + dist_esq
-        parede_esquerda_detectada = dist_esq < self.dist_parede_detectada
-        parede_direita_detectada = dist_dir < self.dist_parede_detectada
 
         if dist_frente < self.dist_seguranca_frontal:
             msg.linear.x = 0.0
             msg.linear.y = 0.0
             msg.angular.z = 0.8
 
-        elif dist_frente_dir < 0.4:
-            msg.linear.x = 0.15
-            msg.linear.y = 0.1
-            msg.angular.z = 0.4
-
-        elif dist_frente_esq < 0.4:
-            msg.linear.x = 0.15
-            msg.linear.y = -0.1
-            msg.angular.z = -0.4
+        elif dist_frente_dir < 0.5:
+            msg.linear.x = 0.2
+            msg.linear.y = 0.0
+            msg.angular.z = 0.5
 
         else:
-            if not (parede_esquerda_detectada and parede_direita_detectada):
-                msg.linear.x = min(self.vel_entrada, self.max_linear_x)
-                msg.linear.y = 0.0
-                msg.angular.z = 0.0
-            elif largura_corredor < 1.0:
-                erro_lateral = (dist_esq - dist_dir) / 2.0
-                k = self.k_lateral * 0.5
-                vel = self.vel_cruzeiro * 0.5
-                msg.linear.x = min(vel, self.max_linear_x)
-                msg.linear.y = -k * erro_lateral
-                msg.linear.y = max(min(msg.linear.y, self.max_linear_y), -self.max_linear_y)
-                msg.angular.z = 0.0
-            else:
-                erro_lateral = dist_dir - self.dist_parede_alvo
-                k = self.k_lateral
-                vel = self.vel_cruzeiro
-                msg.linear.x = min(vel, self.max_linear_x)
-                msg.linear.y = -k * erro_lateral
-                msg.linear.y = max(min(msg.linear.y, self.max_linear_y), -self.max_linear_y)
-                if dist_frente < self.dist_reducao_lateral_frente:
-                    msg.linear.y *= self.reducao_lateral_perto
-                msg.angular.z = 0.0
+            msg.linear.x = self.vel_cruzeiro
+
+            erro_lateral = dist_dir - self.dist_parede_alvo
+            msg.linear.y = -self.k_lateral * erro_lateral
+
+            msg.linear.x = min(msg.linear.x, self.max_linear_x)
+            msg.linear.y = max(min(msg.linear.y, self.max_linear_y), -self.max_linear_y)
+            msg.angular.z = max(min(msg.angular.z, self.max_angular_z), -self.max_angular_z)
 
         self.publisher_.publish(msg)
 

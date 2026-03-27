@@ -21,7 +21,8 @@ class MazeVisionNode(Node):
         
         self.bridge = CvBridge()
         self.min_color_pixels = int(self.declare_parameter('min_color_pixels', 12000).value)
-        self.last_published_color = "none"
+        self.debug_log_interval = float(self.declare_parameter('debug_log_interval', 0.7).value)
+        self.last_debug_log_time = -1e9
 
     def image_callback(self, msg):
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
@@ -60,13 +61,14 @@ class MazeVisionNode(Node):
 
         self.color_pub.publish(msg_cor)
 
-        if msg_cor.data != self.last_published_color:
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self.last_debug_log_time >= self.debug_log_interval:
+            self.last_debug_log_time = now
             self.get_logger().info(
-                f"[COR {self.last_published_color} -> {msg_cor.data}] "
-                f"vermelho={red_pixels} verde={green_pixels} azul={blue_pixels} "
-                f"limite={self.min_color_pixels}"
+                f"Color: {msg_cor.data} "
+                f"(red={red_pixels}, green={green_pixels}, blue={blue_pixels}, "
+                f"limit={self.min_color_pixels})"
             )
-            self.last_published_color = msg_cor.data
 
         mask_total = cv2.bitwise_or(mask_red, cv2.bitwise_or(mask_green, mask_blue))
         cv2.imshow("Robot vision", mask_total)
