@@ -34,6 +34,8 @@ class MazeRobot(Node):
         self.state = "FORWARD"
         self.latest_scan = None
         self.current_yaw = 0.0
+        self.current_x = 0.0
+        self.current_y = 0.0
         self.current_color = "none"
         self.heading_target = None
 
@@ -59,6 +61,12 @@ class MazeRobot(Node):
         # Anti-loop
         self.forward_grace_sec = 1.0
         self.forward_grace_until = 0.0
+        self.wall_recount_radius = 0.70
+        self.counted_walls = {
+            "red": [],
+            "green": [],
+            "blue": [],
+        }
 
         # 🔥 FILTRO LIDAR
         self.front_history = []
@@ -73,8 +81,11 @@ class MazeRobot(Node):
 
     def odom_callback(self, msg):
         o = msg.pose.pose.orientation
+        p = msg.pose.pose.position
         _, _, yaw = self.euler_from_quaternion(o.x, o.y, o.z, o.w)
         self.current_yaw = yaw
+        self.current_x = p.x
+        self.current_y = p.y
 
     def color_callback(self, msg):
         self.current_color = msg.data
@@ -114,11 +125,15 @@ class MazeRobot(Node):
         if self.state == "FORWARD" and now >= self.forward_grace_until:
 
             if self.current_color == "green":
+                if not self.should_count_wall("green", front):
+                    return
                 self.get_logger().info("🟢 curva direita")
                 self.start_curve(-1)
                 return
 
             elif self.current_color == "red":
+                if not self.should_count_wall("red", front):
+                    return
                 self.get_logger().info("🔴 curva esquerda")
                 self.start_curve(+1)
                 return
@@ -181,6 +196,28 @@ class MazeRobot(Node):
         self.state = "CURVE"
         self.curve_direction = direction
         self.current_color = "none"
+
+    def should_count_wall(self, color, front_distance):
+        if color not in self.counted_walls:
+            return True
+
+        wall_x = self.current_x
+        wall_y = self.current_y
+        if math.isfinite(front_distance) and front_distance > 0.05:
+            wall_x = self.current_x + front_distance * math.cos(self.current_yaw)
+            wall_y = self.current_y + front_distance * math.sin(self.current_yaw)
+
+        for wx, wy in self.counted_walls[color]:
+            d = math.hypot(wall_x - wx, wall_y - wy)
+            if d <= self.wall_recount_radius:
+                self.get_logger().info(
+                    f"↩️ {color} já contado neste muro (d={d:.2f}m)"
+                )
+                self.current_color = "none"
+                return False
+
+        self.counted_walls[color].append((wall_x, wall_y))
+        return True
 
     # =========================
     # 🔥 FILTRO MEDIANA
