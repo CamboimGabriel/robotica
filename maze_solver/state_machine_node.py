@@ -32,6 +32,18 @@ class MazeStateMachineNode(Node):
         self.front_obstacle_threshold = float(
             self.declare_parameter("front_obstacle_threshold", 0.45).value
         )
+        self.approach_slowdown_distance = float(
+            self.declare_parameter("approach_slowdown_distance", 0.8).value
+        )
+        self.min_approach_speed = float(
+            self.declare_parameter("min_approach_speed", 0.05).value
+        )
+        self.lateral_reduce_distance = float(
+            self.declare_parameter("lateral_reduce_distance", 1.0).value
+        )
+        self.lateral_reduce_factor = float(
+            self.declare_parameter("lateral_reduce_factor", 0.35).value
+        )
         self.marker_distance_threshold = float(
             self.declare_parameter("marker_distance_threshold", 0.5).value
         )
@@ -60,6 +72,7 @@ class MazeStateMachineNode(Node):
         self.current_position: Optional[Tuple[float, float, float]] = None
         self.latest_color: str = "none"
         self.used_markers: List[Dict[str, float]] = []
+        self.last_front_distance: float = float("inf")
 
         self.create_timer(1.0 / self.control_rate_hz, self.control_loop)
         self.get_logger().info("Maquina de estados iniciada")
@@ -156,6 +169,7 @@ class MazeStateMachineNode(Node):
             return
 
         front, left, right = self.process_scan_sectors(self.latest_scan)
+        self.last_front_distance = front
 
         if front < self.front_obstacle_threshold:
             if right > left:
@@ -173,18 +187,28 @@ class MazeStateMachineNode(Node):
             return
 
         self.current_state = self.GO_FORWARD
-        self.log_transition(self.GO_FORWARD, "caminho livre")
+        target_speed = self.compute_forward_target_speed(front)
+        self.log_transition(
+            self.GO_FORWARD,
+            f"caminho livre frente={front:.2f}m vel_alvo={target_speed:.2f}m/s",
+        )
         self.execute_current_state()
 
     def execute_current_state(self) -> None:
         cmd = Twist()
 
         if self.current_state == self.GO_FORWARD:
-            if self.current_forward_speed < self.forward_speed:
+            target_speed = self.compute_forward_target_speed(self.last_front_distance)
+            if self.current_forward_speed < target_speed:
                 self.current_forward_speed += self.acceleration_step
-                self.current_forward_speed = min(self.current_forward_speed, self.forward_speed)
+                self.current_forward_speed = min(self.current_forward_speed, target_speed)
+            elif self.current_forward_speed > target_speed:
+                self.current_forward_speed -= self.acceleration_step
+                self.current_forward_speed = max(self.current_forward_speed, target_speed)
             cmd.linear.x = self.current_forward_speed
-            cmd.linear.y = self.latest_nav_cmd.linear.y
+            cmd.linear.y = self.compute_lateral_command(
+                self.latest_nav_cmd.linear.y, self.last_front_distance
+            )
             cmd.angular.z = 0.0
 
         elif self.current_state == self.STOP_BEFORE_TURN:
@@ -277,6 +301,31 @@ class MazeStateMachineNode(Node):
 
     def now_seconds(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
+
+    def compute_forward_target_speed(self, front_distance: float) -> float:
+        if not math.isfinite(front_distance):
+            return self.forward_speed
+        if front_distance <= self.front_obstacle_threshold:
+            return 0.0
+        if front_distance >= self.approach_slowdown_distance:
+            return self.forward_speed
+
+        span = self.approach_slowdown_distance - self.front_obstacle_threshold
+        if span <= 1e-6:
+            return self.min_approach_speed
+
+        ratio = (front_distance - self.front_obstacle_threshold) / span
+        scaled_speed = self.min_approach_speed + ratio * (
+            self.forward_speed - self.min_approach_speed
+        )
+        return max(self.min_approach_speed, min(self.forward_speed, scaled_speed))
+
+    def compute_lateral_command(self, nav_linear_y: float, front_distance: float) -> float:
+        if not math.isfinite(front_distance):
+            return nav_linear_y
+        if front_distance >= self.lateral_reduce_distance:
+            return nav_linear_y
+        return nav_linear_y * self.lateral_reduce_factor
 
 
 def main(args=None) -> None:

@@ -30,6 +30,10 @@ class OmniNavLayer(Node):
         
         self.vel_cruzeiro = 0.25
         self.k_lateral = 0.8
+        self.dist_parede_detectada = 1.2
+        self.vel_entrada = 0.16
+        self.reducao_lateral_perto = 0.35
+        self.dist_reducao_lateral_frente = 0.9
         
         self.max_linear_x = 0.3
         self.max_linear_y = 0.2
@@ -56,6 +60,8 @@ class OmniNavLayer(Node):
     def gerar_comando(self, dist_frente, dist_frente_dir, dist_frente_esq, dist_dir, dist_esq):
         msg = Twist()
         largura_corredor = dist_dir + dist_esq
+        parede_esquerda_detectada = dist_esq < self.dist_parede_detectada
+        parede_direita_detectada = dist_dir < self.dist_parede_detectada
 
         if dist_frente < self.dist_seguranca_frontal:
             msg.linear.x = 0.0
@@ -73,20 +79,28 @@ class OmniNavLayer(Node):
             msg.angular.z = -0.4
 
         else:
-            # In narrow corridors, center between both walls
-            if largura_corredor < 1.0:
+            if not (parede_esquerda_detectada and parede_direita_detectada):
+                msg.linear.x = min(self.vel_entrada, self.max_linear_x)
+                msg.linear.y = 0.0
+                msg.angular.z = 0.0
+            elif largura_corredor < 1.0:
                 erro_lateral = (dist_esq - dist_dir) / 2.0
                 k = self.k_lateral * 0.5
                 vel = self.vel_cruzeiro * 0.5
+                msg.linear.x = min(vel, self.max_linear_x)
+                msg.linear.y = -k * erro_lateral
+                msg.linear.y = max(min(msg.linear.y, self.max_linear_y), -self.max_linear_y)
+                msg.angular.z = 0.0
             else:
                 erro_lateral = dist_dir - self.dist_parede_alvo
                 k = self.k_lateral
                 vel = self.vel_cruzeiro
-
-            msg.linear.x = min(vel, self.max_linear_x)
-            msg.linear.y = -k * erro_lateral
-            msg.linear.y = max(min(msg.linear.y, self.max_linear_y), -self.max_linear_y)
-            msg.angular.z = 0.0
+                msg.linear.x = min(vel, self.max_linear_x)
+                msg.linear.y = -k * erro_lateral
+                msg.linear.y = max(min(msg.linear.y, self.max_linear_y), -self.max_linear_y)
+                if dist_frente < self.dist_reducao_lateral_frente:
+                    msg.linear.y *= self.reducao_lateral_perto
+                msg.angular.z = 0.0
 
         self.publisher_.publish(msg)
 
