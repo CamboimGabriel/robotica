@@ -42,7 +42,7 @@ class MazeRobot(Node):
         # Curva
         self.curve_direction = 0
         self.curve_strength = 0.5
-        self.curve_forward_speed = 0.14
+        self.curve_forward_speed = 0.08
 
         # Distâncias
         self.front_slow_threshold = 1.0
@@ -50,8 +50,8 @@ class MazeRobot(Node):
         self.front_emergency_threshold = 0.40
 
         # Velocidade
-        self.linear_speed = 0.25
-        self.min_linear_speed = 0.08
+        self.linear_speed = 0.15
+        self.min_linear_speed = 0.04
 
         # Heading
         self.heading_kp = 1.2
@@ -61,17 +61,11 @@ class MazeRobot(Node):
         # Anti-loop
         self.forward_grace_sec = 1.0
         self.forward_grace_until = 0.0
-        self.wall_recount_radius = 0.45
-        self.recount_window_sec = 2.0
+        self.wall_recount_radius = 0.85
         self.counted_walls = {
             "red": [],
             "green": [],
             "blue": [],
-        }
-        self.last_color_match_time = {
-            "red": -1e9,
-            "green": -1e9,
-            "blue": -1e9,
         }
 
         # 🔥 FILTRO LIDAR
@@ -128,17 +122,17 @@ class MazeRobot(Node):
             return
 
         # COR
-        if self.state in ("FORWARD", "CURVE") and now >= self.forward_grace_until:
+        if self.state == "FORWARD" and now >= self.forward_grace_until:
 
             if self.current_color == "green":
-                if not self.should_count_wall("green", front, now):
+                if not self.should_count_wall("green", front):
                     return
                 self.get_logger().info("🟢 curva direita")
                 self.start_curve(-1)
                 return
 
             elif self.current_color == "red":
-                if not self.should_count_wall("red", front, now):
+                if not self.should_count_wall("red", front):
                     return
                 self.get_logger().info("🔴 curva esquerda")
                 self.start_curve(+1)
@@ -203,13 +197,8 @@ class MazeRobot(Node):
         self.curve_direction = direction
         self.current_color = "none"
 
-    def should_count_wall(self, color, wall_distance, now):
+    def should_count_wall(self, color, wall_distance):
         if color not in self.counted_walls:
-            return True
-
-        dt = now - self.last_color_match_time[color]
-        if dt <= self.recount_window_sec:
-            self.last_color_match_time[color] = now
             return True
 
         wall_x, wall_y = self.estimate_wall_position(wall_distance)
@@ -218,13 +207,12 @@ class MazeRobot(Node):
             d = math.hypot(wall_x - wx, wall_y - wy)
             if d <= self.wall_recount_radius:
                 self.get_logger().info(
-                    f"↩️ {color} já contado neste muro (d={d:.2f}m)"
+                    f"↩️ {color} já contado (d={d:.2f}m)"
                 )
                 self.current_color = "none"
                 return False
 
         self.counted_walls[color].append((wall_x, wall_y))
-        self.last_color_match_time[color] = now
         self.get_logger().info(
             f"✅ {color} novo muro salvo em ({wall_x:.2f}, {wall_y:.2f})"
         )
